@@ -1,14 +1,20 @@
-// src/app/app.component.ts
+// src/app/app.component.ts - FIRST APP (CAPTURE APP)
 import { Component, ElementRef, OnDestroy, OnInit, ViewChild } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { IdCardDetectorService, Detection } from './services/id-card-detector.service';
+import { DatabaseService } from './services/database.service';
+import { Router } from '@angular/router';
+import { HttpClient, HttpClientModule } from '@angular/common/http';
+
+// Define API service URL - update this with your actual API endpoint
+const API_URL = 'http://localhost:8001/api/idcards/';
 
 @Component({
   selector: 'app-root',
   templateUrl: './app.component.html',
   styleUrls: ['./app.component.css'],
   standalone: true,
-  imports: [CommonModule]
+  imports: [CommonModule,HttpClientModule]
 })
 export class AppComponent implements OnInit, OnDestroy {
   @ViewChild('videoElement', { static: true }) videoElement!: ElementRef<HTMLVideoElement>;
@@ -22,11 +28,10 @@ export class AppComponent implements OnInit, OnDestroy {
   inferenceTime = 0;
   stream: MediaStream | null = null;
   animationFrameId: number | null = null;
-  // Use a relative web path instead of absolute file system path
   modelPath = 'assets/best.onnx';
   errorMessage = '';
   
-  // New properties for document verification
+  // Document verification properties
   countries: string[] = ['Sri Lanka', 'India', 'United States', 'United Kingdom', 'Australia'];
   selectedCountry: string = 'Sri Lanka';
   documentTypes: string[] = ['ID Card', 'Driving License'];
@@ -41,12 +46,22 @@ export class AppComponent implements OnInit, OnDestroy {
   
   // Image quality properties
   originalCapturedImage: string | null = null;
-  cropMargin = 20; // Margin in pixels to add around the cropped image
+  cropMargin = 20;
   flashActive: boolean = false;
   captureTimeout: any = null;
   capturingImage: boolean = false;
+  
+  // Processing status properties
+  processingImage: boolean = false;
+  storedImageId: string | null = null;
+  apiStoredId: string | null = null;
 
-  constructor(private idCardDetector: IdCardDetectorService) {}
+  constructor(
+    private idCardDetector: IdCardDetectorService,
+    private databaseService: DatabaseService,
+    private router: Router,
+    private http: HttpClient
+  ) {}
 
   async ngOnInit(): Promise<void> {
     try {
@@ -439,13 +454,80 @@ export class AppComponent implements OnInit, OnDestroy {
   retakePhoto(): void {
     this.capturedImage = null;
     this.originalCapturedImage = null;
+    this.storedImageId = null;
+    this.apiStoredId = null;
     this.startCamera();
   }
   
-  proceedWithImage(): void {
-    console.log('Proceeding with the captured image...');
-    // Logic for proceeding will be added later
-    alert('Proceeding with the captured image!');
+  /**
+   * Process the captured image, store it locally and in the backend API,
+   * then redirect to the second app with the ID as a parameter
+   */
+  async proceedWithImage(): Promise<void> {
+    if (!this.capturedImage) {
+      this.errorMessage = 'No image captured. Please try again.';
+      return;
+    }
+    
+    try {
+      this.processingImage = true;
+      console.log('Proceeding with the captured image...');
+      console.log(`Document type: ${this.selectedDocType}, Country: ${this.selectedCountry}`);
+      
+      // 1. Store data in local IndexedDB (for this app's use)
+      this.storedImageId = await this.databaseService.storeIdCardData(
+        this.capturedImage,
+        this.selectedCountry,
+        this.selectedDocType
+      );
+      
+      console.log('Image stored locally with ID:', this.storedImageId);
+      
+      // 2. Send data to backend API for cross-app sharing
+      const apiRequest = {
+        image: this.capturedImage,
+        country: this.selectedCountry,
+        documentType: this.selectedDocType
+      };
+      
+      // Using HttpClient for better error handling
+      const apiResponse = await this.http.post<{id: string, timestamp: number}>(
+        API_URL, 
+        apiRequest
+      ).toPromise();
+      
+      if (!apiResponse || !apiResponse.id) {
+        throw new Error('Invalid API response');
+      }
+      
+      // Store the API ID
+      this.apiStoredId = apiResponse.id;
+      console.log('Image stored in backend API with ID:', this.apiStoredId);
+      
+      // 3. Check if the data is retrievable from the API
+      const verifyResponse = await this.http.get(`${API_URL}${this.apiStoredId}`).toPromise();
+      console.log('Verified data retrieval from API:', verifyResponse);
+      
+      // 4. Create redirect URL to second app
+      const targetAppBaseUrl = 'http://localhost:3000'; // Update with your second app URL
+      const redirectUrl = `${targetAppBaseUrl}?id=${this.apiStoredId}&docType=${encodeURIComponent(this.selectedDocType)}&country=${encodeURIComponent(this.selectedCountry)}`;
+      
+      // 5. Confirm and redirect
+      // const confirmRedirect = confirm(
+      //   `ID card captured and stored successfully!\n\nID: ${this.apiStoredId}\n\nYou will now be redirected to the verification app.`
+      // );
+      window.location.href = redirectUrl;
+      // if (confirmRedirect) {
+      //   console.log('Redirecting to:', redirectUrl);
+      //   window.location.href = redirectUrl;
+      // }
+      
+    } catch (error) {
+      console.error('Error processing image:', error);
+      this.errorMessage = 'Failed to process and store image data. Please try again.';
+    } finally {
+      this.processingImage = false;
+    }
   }
   
   // For debugging - toggle between cropped and original image
